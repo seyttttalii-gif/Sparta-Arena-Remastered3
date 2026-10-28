@@ -19,24 +19,46 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Godot ve Windows dışa aktarma şablonlarını kur
-        uses: chickensoft-games/setup-godot@v2
+        uses: chickensoft-games/setup-godot@v2.4.3
         with:
           version: 4.7.2
           use-dotnet: false
           include-templates: true
 
-      - name: Godot kurulumunu doğrula
+      - name: Godot EXE dosyasını bul ve kurulumunu doğrula
         shell: pwsh
         run: |
-          $ErrorActionPreference = "Continue"
-          $godotCommand = Get-Command godot -ErrorAction Stop
-          Write-Host "Godot yolu: $($godotCommand.Source)"
-          & godot --version
-          $versionExitCode = $LASTEXITCODE
-          Write-Host "Godot sürüm komutu çıkış kodu: $versionExitCode"
-          if ($versionExitCode -ne 0) {
-            throw "Godot kurulu görünmüyor veya çalıştırılamıyor."
+          $ErrorActionPreference = "Stop"
+          # setup-godot Windows'ta PATH içine uzantısız bir "godot" bağlantısı koyabilir.
+          # PowerShell bu bağlantıyı güvenilir şekilde başlatmayabildiği için gerçek .exe dosyasını çağırıyoruz.
+          $installDir = Join-Path $HOME "godot"
+          Write-Host "Godot kurulum klasörü: $installDir"
+
+          $godotExe = Get-ChildItem -LiteralPath $installDir -Filter "Godot_v*_win64.exe" -Recurse -File -ErrorAction SilentlyContinue |
+            Select-Object -First 1
+
+          if (-not $godotExe) {
+            Write-Host "Kurulum klasörünün içeriği:"
+            if (Test-Path -LiteralPath $installDir) {
+              Get-ChildItem -LiteralPath $installDir -Recurse -File | Select-Object -First 30 -ExpandProperty FullName | ForEach-Object { Write-Host $_ }
+            } else {
+              Write-Host "Kurulum klasörü bulunamadı."
+            }
+            throw "Godot .exe dosyası bulunamadı. setup-godot adımının günlüklerini kontrol et."
           }
+
+          $godotExePath = $godotExe.FullName
+          Write-Host "Godot EXE yolu: $godotExePath"
+          $versionOutput = & $godotExePath --version 2>&1
+          $versionExitCode = $LASTEXITCODE
+          $versionOutput | ForEach-Object { Write-Host $_ }
+          Write-Host "Godot sürüm komutu çıkış kodu: [$versionExitCode]"
+
+          if ($versionExitCode -ne 0) {
+            throw "Godot EXE bulundu ama başlatma testi başarısız oldu. Yukarıdaki hata ayrıntılarını kontrol et."
+          }
+
+          Add-Content -LiteralPath $env:GITHUB_ENV -Value "GODOT_EXE=$godotExePath"
 
       - name: Yeni proje ZIP dosyasını aç
         shell: pwsh
@@ -72,7 +94,7 @@ jobs:
           $logFile = Join-Path $env:GITHUB_WORKSPACE "diagnostics/godot-import.log"
           Write-Host "Godot kaynakları içe aktarılıyor. Günlük: $logFile"
 
-          & godot --headless --verbose --editor --path "$env:PROJECT_DIR" --import 2>&1 | Tee-Object -FilePath $logFile
+          & "$env:GODOT_EXE" --headless --verbose --editor --path "$env:PROJECT_DIR" --import 2>&1 | Tee-Object -FilePath $logFile
           $importExitCode = $LASTEXITCODE
           Write-Host "Godot içe aktarma çıkış kodu: [$importExitCode]"
 
@@ -87,7 +109,7 @@ jobs:
           $logFile = Join-Path $env:GITHUB_WORKSPACE "diagnostics/godot-runtime.log"
           Write-Host "Ana sahne headless test ediliyor. Günlük: $logFile"
 
-          & godot --headless --verbose --path "$env:PROJECT_DIR" --quit-after 3 2>&1 | Tee-Object -FilePath $logFile
+          & "$env:GODOT_EXE" --headless --verbose --path "$env:PROJECT_DIR" --quit-after 3 2>&1 | Tee-Object -FilePath $logFile
           $runtimeExitCode = $LASTEXITCODE
           Write-Host "Godot açılış testi çıkış kodu: [$runtimeExitCode]"
 
@@ -109,7 +131,7 @@ jobs:
           $exe = Join-Path $buildDir "SpartaArenaRemastered.exe"
           $logFile = Join-Path $env:GITHUB_WORKSPACE "diagnostics/godot-export.log"
 
-          & godot --headless --verbose --path "$env:PROJECT_DIR" --export-release "Windows Desktop" "$exe" 2>&1 | Tee-Object -FilePath $logFile
+          & "$env:GODOT_EXE" --headless --verbose --path "$env:PROJECT_DIR" --export-release "Windows Desktop" "$exe" 2>&1 | Tee-Object -FilePath $logFile
           $exportExitCode = $LASTEXITCODE
           Write-Host "Godot dışa aktarma çıkış kodu: [$exportExitCode]"
 
