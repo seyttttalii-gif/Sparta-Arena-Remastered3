@@ -10,9 +10,10 @@ permissions:
 
 jobs:
   build-windows:
-    name: Extract, validate and export Windows EXE
+    name: Extract, diagnose and export Windows EXE
     runs-on: windows-latest
     timeout-minutes: 60
+
     steps:
       - name: Depoyu indir
         uses: actions/checkout@v4
@@ -24,46 +25,108 @@ jobs:
           use-dotnet: false
           include-templates: true
 
+      - name: Godot kurulumunu doğrula
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Continue"
+          $godotCommand = Get-Command godot -ErrorAction Stop
+          Write-Host "Godot yolu: $($godotCommand.Source)"
+          & godot --version
+          $versionExitCode = $LASTEXITCODE
+          Write-Host "Godot sürüm komutu çıkış kodu: $versionExitCode"
+          if ($versionExitCode -ne 0) {
+            throw "Godot kurulu görünmüyor veya çalıştırılamıyor."
+          }
+
       - name: Yeni proje ZIP dosyasını aç
         shell: pwsh
         run: |
+          $ErrorActionPreference = "Stop"
           $archivePath = Join-Path $env:GITHUB_WORKSPACE "SpartaArenaRemastered_FullMigration.zip"
           if (-not (Test-Path $archivePath)) {
-            throw "SpartaArenaRemastered_FullMigration.zip bulunamadı. Yeni proje ZIP dosyasını depo köküne yükle."
+            throw "SpartaArenaRemastered_FullMigration.zip bulunamadı. ZIP dosyasını depo köküne yükle."
           }
+
           $extractDir = Join-Path $env:GITHUB_WORKSPACE "unpacked"
-          if (Test-Path $extractDir) { Remove-Item $extractDir -Recurse -Force }
+          if (Test-Path $extractDir) {
+            Remove-Item $extractDir -Recurse -Force
+          }
           Expand-Archive -LiteralPath $archivePath -DestinationPath $extractDir -Force
+
           $projectFile = Get-ChildItem -Path $extractDir -Filter "project.godot" -Recurse -File | Select-Object -First 1
-          if (-not $projectFile) { throw "ZIP içinde project.godot bulunamadı." }
+          if (-not $projectFile) {
+            throw "ZIP içinde project.godot bulunamadı."
+          }
+
           $projectDir = $projectFile.DirectoryName
           Add-Content -Path $env:GITHUB_ENV -Value "PROJECT_DIR=$projectDir"
+          $diagnosticDir = Join-Path $env:GITHUB_WORKSPACE "diagnostics"
+          New-Item -ItemType Directory -Force -Path $diagnosticDir | Out-Null
           Write-Host "Godot proje yolu: $projectDir"
+          Write-Host "Proje ayarı dosyası: $($projectFile.FullName)"
 
-      - name: Kaynakları içe aktar ve doğrula
+      - name: Kaynakları içe aktar ve tüm çıktıyı göster
         shell: pwsh
         run: |
-          godot --headless --editor --path "$env:PROJECT_DIR" --import --quit
-          if ($LASTEXITCODE -ne 0) { throw "Godot kaynak içe aktarma hatası: $LASTEXITCODE" }
+          $ErrorActionPreference = "Continue"
+          $logFile = Join-Path $env:GITHUB_WORKSPACE "diagnostics/godot-import.log"
+          Write-Host "Godot kaynakları içe aktarılıyor. Günlük: $logFile"
 
-      - name: Godot açılış testi
+          & godot --headless --verbose --editor --path "$env:PROJECT_DIR" --import 2>&1 | Tee-Object -FilePath $logFile
+          $importExitCode = $LASTEXITCODE
+          Write-Host "Godot içe aktarma çıkış kodu: [$importExitCode]"
+
+          if ($importExitCode -ne 0) {
+            throw "Godot içe aktarma adımı başarısız oldu. Yukarıdaki günlük çıktısını veya diagnostics/godot-import.log dosyasını kontrol et."
+          }
+
+      - name: Godot açılış testi ve GDScript hatalarını kontrol et
         shell: pwsh
         run: |
-          godot --headless --path "$env:PROJECT_DIR" --quit-after 3
-          if ($LASTEXITCODE -ne 0) { throw "Godot açılış testi başarısız: $LASTEXITCODE" }
+          $ErrorActionPreference = "Continue"
+          $logFile = Join-Path $env:GITHUB_WORKSPACE "diagnostics/godot-runtime.log"
+          Write-Host "Ana sahne headless test ediliyor. Günlük: $logFile"
 
-      - name: Windows EXE oluştur
+          & godot --headless --verbose --path "$env:PROJECT_DIR" --quit-after 3 2>&1 | Tee-Object -FilePath $logFile
+          $runtimeExitCode = $LASTEXITCODE
+          Write-Host "Godot açılış testi çıkış kodu: [$runtimeExitCode]"
+
+          if ($runtimeExitCode -ne 0) {
+            throw "Godot açılış testi başarısız oldu. diagnostics/godot-runtime.log dosyasını kontrol et."
+          }
+
+          $runtimeText = Get-Content -LiteralPath $logFile -Raw -ErrorAction SilentlyContinue
+          if ($runtimeText -match '(?im)(SCRIPT ERROR:|Parse Error:|Failed to load script|Could not parse script)') {
+            throw "Godot günlüklerinde GDScript ayrıştırma/yükleme hatası bulundu. Yukarıdaki satırları veya diagnostics/godot-runtime.log dosyasını kontrol et."
+          }
+
+      - name: Windows EXE oluştur ve çıktıyı göster
         shell: pwsh
         run: |
+          $ErrorActionPreference = "Continue"
           $buildDir = Join-Path $env:PROJECT_DIR "build"
           New-Item -ItemType Directory -Force -Path $buildDir | Out-Null
           $exe = Join-Path $buildDir "SpartaArenaRemastered.exe"
-          godot --headless --path "$env:PROJECT_DIR" --export-release "Windows Desktop" "$exe"
-          if ($LASTEXITCODE -ne 0 -or -not (Test-Path $exe)) {
-            throw "Windows EXE oluşturulamadı. Çıkış kodu: $LASTEXITCODE"
-          }
+          $logFile = Join-Path $env:GITHUB_WORKSPACE "diagnostics/godot-export.log"
 
-      - name: EXE dosyasını indirilebilir artifact yap
+          & godot --headless --verbose --path "$env:PROJECT_DIR" --export-release "Windows Desktop" "$exe" 2>&1 | Tee-Object -FilePath $logFile
+          $exportExitCode = $LASTEXITCODE
+          Write-Host "Godot dışa aktarma çıkış kodu: [$exportExitCode]"
+
+          if ($exportExitCode -ne 0 -or -not (Test-Path $exe)) {
+            throw "Windows EXE oluşturulamadı. diagnostics/godot-export.log dosyasını kontrol et."
+          }
+          Write-Host "EXE oluşturuldu: $exe"
+
+      - name: Derleme günlüklerini hata olsa bile yükle
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Sparta-Arena-Remastered-Build-Logs
+          path: diagnostics/*.log
+          if-no-files-found: ignore
+
+      - name: Windows EXE dosyasını indirilebilir yap
         uses: actions/upload-artifact@v4
         with:
           name: Sparta-Arena-Remastered-Windows
