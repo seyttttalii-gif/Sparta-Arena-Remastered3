@@ -15,7 +15,6 @@ jobs:
     timeout-minutes: 60
     defaults:
       run:
-        # setup-godot'un Windows'ta desteklediği PATH komutu Bash üzerinden çalıştırılır.
         shell: bash
 
     steps:
@@ -32,11 +31,14 @@ jobs:
       - name: Godot kurulumunu doğrula
         run: |
           set -euo pipefail
-          echo "PATH içindeki Godot komutu:"
+          echo "Godot komutu:"
           command -v godot
           godot --headless --version
+          echo "Windows export template dosyaları (tanı amaçlı):"
+          APPDATA_UNIX="$(cygpath -u "$APPDATA")"
+          find "$APPDATA_UNIX/Godot/export_templates" -type f -iname 'windows_release_x86_64.exe' -print 2>/dev/null || true
 
-      - name: Yeni proje ZIP dosyasını aç ve projeyi bul
+      - name: Proje ZIP dosyasını aç ve projeyi bul
         run: |
           set -euo pipefail
           ARCHIVE="SpartaArenaRemastered_FullMigration.zip"
@@ -48,30 +50,30 @@ jobs:
           fi
 
           rm -rf unpacked
-          mkdir -p unpacked
+          mkdir -p unpacked diagnostics
           unzip -q "$ARCHIVE" -d unpacked
 
           PROJECT_FILE="$(find unpacked -type f -name 'project.godot' -print -quit)"
           if [[ -z "$PROJECT_FILE" ]]; then
-            echo "Arşivden çıkarılan dosyalardan örnekler:"
-            find unpacked -maxdepth 4 -type f -print | head -80 || true
             echo "HATA: ZIP içinde project.godot bulunamadı."
+            find unpacked -maxdepth 4 -type f -print | head -80 || true
             exit 1
           fi
 
-          PROJECT_DIR="$(dirname "$PROJECT_FILE")"
-          echo "Godot proje dosyası: $PROJECT_FILE"
-          echo "Godot proje klasörü: $PROJECT_DIR"
-          echo "PROJECT_REL_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
-          mkdir -p diagnostics
+          PROJECT_REL_DIR="$(dirname "$PROJECT_FILE")"
+          PROJECT_ABS_DIR="$(cd "$PROJECT_REL_DIR" && pwd -P)"
+          PROJECT_ABS_DIR_WIN="$(cygpath -aw "$PROJECT_ABS_DIR")"
+          echo "Proje dosyası: $PROJECT_FILE"
+          echo "Proje mutlak yolu: $PROJECT_ABS_DIR_WIN"
+          echo "PROJECT_REL_DIR=$PROJECT_REL_DIR" >> "$GITHUB_ENV"
+          echo "PROJECT_ABS_DIR_WIN=$PROJECT_ABS_DIR_WIN" >> "$GITHUB_ENV"
 
       - name: Godot kaynaklarını içe aktar
         run: |
           set -uo pipefail
-          mkdir -p diagnostics
           echo "Kaynaklar içe aktarılıyor. Günlük: diagnostics/godot-import.log"
           set +e
-          godot --headless --verbose --editor --path "$PROJECT_REL_DIR" --import 2>&1 | tee diagnostics/godot-import.log
+          godot --headless --verbose --editor --path "$PROJECT_ABS_DIR_WIN" --import --quit 2>&1 | tee diagnostics/godot-import.log
           IMPORT_EXIT_CODE=${PIPESTATUS[0]}
           set -e
           echo "Godot içe aktarma çıkış kodu: $IMPORT_EXIT_CODE"
@@ -85,7 +87,7 @@ jobs:
           set -uo pipefail
           echo "Ana sahne kontrol ediliyor. Günlük: diagnostics/godot-runtime.log"
           set +e
-          godot --headless --verbose --path "$PROJECT_REL_DIR" --quit-after 3 2>&1 | tee diagnostics/godot-runtime.log
+          godot --headless --verbose --path "$PROJECT_ABS_DIR_WIN" --quit-after 3 2>&1 | tee diagnostics/godot-runtime.log
           RUNTIME_EXIT_CODE=${PIPESTATUS[0]}
           set -e
           echo "Godot açılış testi çıkış kodu: $RUNTIME_EXIT_CODE"
@@ -101,20 +103,27 @@ jobs:
       - name: Windows EXE oluştur
         run: |
           set -uo pipefail
-          BUILD_DIR="$PROJECT_REL_DIR/build"
-          mkdir -p "$BUILD_DIR" diagnostics
-          EXE_PATH="$BUILD_DIR/SpartaArenaRemastered.exe"
+          # Proje yolunu tekrar Bash/Git for Windows biçimine çevir ve çıktı klasörünü oluştur.
+          PROJECT_ABS_DIR_UNIX="$(cygpath -u "$PROJECT_ABS_DIR_WIN")"
+          BUILD_DIR_UNIX="$PROJECT_ABS_DIR_UNIX/build"
+          mkdir -p "$BUILD_DIR_UNIX" diagnostics
+          EXE_PATH_UNIX="$BUILD_DIR_UNIX/SpartaArenaRemastered.exe"
+          EXE_PATH_WIN="$(cygpath -aw "$EXE_PATH_UNIX")"
+          echo "Proje: $PROJECT_ABS_DIR_WIN"
+          echo "EXE çıktı yolu: $EXE_PATH_WIN"
           echo "Windows dışa aktarma başlatılıyor. Günlük: diagnostics/godot-export.log"
           set +e
-          godot --headless --verbose --path "$PROJECT_REL_DIR" --export-release "Windows Desktop" "$EXE_PATH" 2>&1 | tee diagnostics/godot-export.log
+          godot --headless --verbose --path "$PROJECT_ABS_DIR_WIN" --export-release "Windows Desktop" "$EXE_PATH_WIN" 2>&1 | tee diagnostics/godot-export.log
           EXPORT_EXIT_CODE=${PIPESTATUS[0]}
           set -e
           echo "Godot dışa aktarma çıkış kodu: $EXPORT_EXIT_CODE"
-          if [[ "$EXPORT_EXIT_CODE" -ne 0 || ! -f "$EXE_PATH" ]]; then
+          if [[ "$EXPORT_EXIT_CODE" -ne 0 || ! -f "$EXE_PATH_UNIX" ]]; then
             echo "HATA: Windows EXE oluşturulamadı. diagnostics/godot-export.log dosyasını incele."
+            echo "Oluşturma klasörünün içeriği:"
+            ls -la "$BUILD_DIR_UNIX" || true
             exit 1
           fi
-          echo "EXE oluşturuldu: $EXE_PATH"
+          echo "EXE oluşturuldu: $EXE_PATH_UNIX"
 
       - name: Derleme günlüklerini hata olsa bile yükle
         if: always()
