@@ -1,0 +1,71 @@
+name: Sparta Arena Remastered - Windows Build
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-windows:
+    name: Extract, validate and export Windows EXE
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - name: Depoyu indir
+        uses: actions/checkout@v4
+
+      - name: Godot ve Windows dışa aktarma şablonlarını kur
+        uses: chickensoft-games/setup-godot@v2
+        with:
+          version: 4.7.2
+          use-dotnet: false
+          include-templates: true
+
+      - name: Yeni proje ZIP dosyasını aç
+        shell: pwsh
+        run: |
+          $archivePath = Join-Path $env:GITHUB_WORKSPACE "SpartaArenaRemastered_FullMigration.zip"
+          if (-not (Test-Path $archivePath)) {
+            throw "SpartaArenaRemastered_FullMigration.zip bulunamadı. Yeni proje ZIP dosyasını depo köküne yükle."
+          }
+          $extractDir = Join-Path $env:GITHUB_WORKSPACE "unpacked"
+          if (Test-Path $extractDir) { Remove-Item $extractDir -Recurse -Force }
+          Expand-Archive -LiteralPath $archivePath -DestinationPath $extractDir -Force
+          $projectFile = Get-ChildItem -Path $extractDir -Filter "project.godot" -Recurse -File | Select-Object -First 1
+          if (-not $projectFile) { throw "ZIP içinde project.godot bulunamadı." }
+          $projectDir = $projectFile.DirectoryName
+          Add-Content -Path $env:GITHUB_ENV -Value "PROJECT_DIR=$projectDir"
+          Write-Host "Godot proje yolu: $projectDir"
+
+      - name: Kaynakları içe aktar ve doğrula
+        shell: pwsh
+        run: |
+          godot --headless --editor --path "$env:PROJECT_DIR" --import --quit
+          if ($LASTEXITCODE -ne 0) { throw "Godot kaynak içe aktarma hatası: $LASTEXITCODE" }
+
+      - name: Godot açılış testi
+        shell: pwsh
+        run: |
+          godot --headless --path "$env:PROJECT_DIR" --quit-after 3
+          if ($LASTEXITCODE -ne 0) { throw "Godot açılış testi başarısız: $LASTEXITCODE" }
+
+      - name: Windows EXE oluştur
+        shell: pwsh
+        run: |
+          $buildDir = Join-Path $env:PROJECT_DIR "build"
+          New-Item -ItemType Directory -Force -Path $buildDir | Out-Null
+          $exe = Join-Path $buildDir "SpartaArenaRemastered.exe"
+          godot --headless --path "$env:PROJECT_DIR" --export-release "Windows Desktop" "$exe"
+          if ($LASTEXITCODE -ne 0 -or -not (Test-Path $exe)) {
+            throw "Windows EXE oluşturulamadı. Çıkış kodu: $LASTEXITCODE"
+          }
+
+      - name: EXE dosyasını indirilebilir artifact yap
+        uses: actions/upload-artifact@v4
+        with:
+          name: Sparta-Arena-Remastered-Windows
+          path: unpacked/**/build/SpartaArenaRemastered.exe
+          if-no-files-found: error
