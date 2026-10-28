@@ -24,38 +24,55 @@ jobs:
           version: 4.7.2
           use-dotnet: false
           include-templates: true
+          path: .godot-install
+          bin-path: .godot-bin
 
-      - name: Godot EXE dosyasını bul ve kurulumunu doğrula
+      - name: Godot EXE dosyasını doğru klasörde bul ve doğrula
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          # setup-godot Windows'ta PATH içine uzantısız bir "godot" bağlantısı koyabilir.
-          # PowerShell bu bağlantıyı güvenilir şekilde başlatmayabildiği için gerçek .exe dosyasını çağırıyoruz.
-          $installDir = Join-Path $HOME "godot"
+          $installDir = Join-Path $env:GITHUB_WORKSPACE ".godot-install"
+          $binDir = Join-Path $env:GITHUB_WORKSPACE ".godot-bin"
+          $diagnosticDir = Join-Path $env:GITHUB_WORKSPACE "diagnostics"
+          New-Item -ItemType Directory -Force -Path $diagnosticDir | Out-Null
+          $versionLogFile = Join-Path $diagnosticDir "godot-setup.log"
+          Write-Host "Çalışma alanı: $env:GITHUB_WORKSPACE"
           Write-Host "Godot kurulum klasörü: $installDir"
+          Write-Host "Godot komut klasörü: $binDir"
 
-          $godotExe = Get-ChildItem -LiteralPath $installDir -Filter "Godot_v*_win64.exe" -Recurse -File -ErrorAction SilentlyContinue |
-            Select-Object -First 1
+          if (-not (Test-Path -LiteralPath $installDir)) {
+            Write-Host "Çalışma alanındaki klasörler:"
+            Get-ChildItem -LiteralPath $env:GITHUB_WORKSPACE -Force | Select-Object Name, FullName | Format-Table -AutoSize | Out-String | Write-Host
+            throw "Godot kurulum klasörü oluşmadı. setup-godot adımının çıktısını kontrol et."
+          }
+
+          # Önce komut satırı günlüklerini gösterebilen Console EXE'yi tercih et.
+          $godotExe = Get-ChildItem -LiteralPath $installDir -Filter "Godot_v*_win64_console.exe" -Recurse -File -ErrorAction SilentlyContinue | Select-Object -First 1
+          if (-not $godotExe) {
+            $godotExe = Get-ChildItem -LiteralPath $installDir -Filter "Godot_v*_win64.exe" -Recurse -File -ErrorAction SilentlyContinue | Select-Object -First 1
+          }
 
           if (-not $godotExe) {
-            Write-Host "Kurulum klasörünün içeriği:"
-            if (Test-Path -LiteralPath $installDir) {
-              Get-ChildItem -LiteralPath $installDir -Recurse -File | Select-Object -First 30 -ExpandProperty FullName | ForEach-Object { Write-Host $_ }
-            } else {
-              Write-Host "Kurulum klasörü bulunamadı."
-            }
-            throw "Godot .exe dosyası bulunamadı. setup-godot adımının günlüklerini kontrol et."
+            Write-Host "Kurulum klasöründeki dosyalar:"
+            Get-ChildItem -LiteralPath $installDir -Recurse -File -ErrorAction SilentlyContinue | Select-Object -First 80 -ExpandProperty FullName | ForEach-Object { Write-Host $_ }
+            throw "Godot Windows EXE dosyası .godot-install içinde bulunamadı."
           }
 
           $godotExePath = $godotExe.FullName
-          Write-Host "Godot EXE yolu: $godotExePath"
-          $versionOutput = & $godotExePath --version 2>&1
+          Write-Host "Seçilen Godot EXE: $godotExePath"
+          Write-Host "Dosya boyutu: $($godotExe.Length) bayt"
+          Write-Host "Dosya sürüm bilgisi: $((Get-Item -LiteralPath $godotExePath).VersionInfo.FileVersion)"
+
+          # stderr/stdout'u ve dönüş kodunu koru; hata olursa asıl Windows mesajı logda kalır.
+          & $godotExePath --headless --version 2>&1 | Tee-Object -FilePath $versionLogFile
           $versionExitCode = $LASTEXITCODE
-          $versionOutput | ForEach-Object { Write-Host $_ }
-          Write-Host "Godot sürüm komutu çıkış kodu: [$versionExitCode]"
+          Write-Host "Godot başlatma çıkış kodu: [$versionExitCode]"
+          Write-Host "Godot kurulum günlük dosyası: $versionLogFile"
 
           if ($versionExitCode -ne 0) {
-            throw "Godot EXE bulundu ama başlatma testi başarısız oldu. Yukarıdaki hata ayrıntılarını kontrol et."
+            Write-Host "Kurulum klasöründeki EXE'ler:"
+            Get-ChildItem -LiteralPath $installDir -Filter "*.exe" -Recurse -File -ErrorAction SilentlyContinue | Select-Object FullName, Length | Format-Table -AutoSize | Out-String | Write-Host
+            throw "Godot EXE bulundu fakat başlatılamadı. Bu kez gerçek kurulum yolunun tam çıktısı yukarıda kaydedildi."
           }
 
           Add-Content -LiteralPath $env:GITHUB_ENV -Value "GODOT_EXE=$godotExePath"
@@ -65,27 +82,31 @@ jobs:
         run: |
           $ErrorActionPreference = "Stop"
           $archivePath = Join-Path $env:GITHUB_WORKSPACE "SpartaArenaRemastered_FullMigration.zip"
-          if (-not (Test-Path $archivePath)) {
+          if (-not (Test-Path -LiteralPath $archivePath)) {
+            Write-Host "Depo kökündeki ZIP dosyaları:"
+            Get-ChildItem -LiteralPath $env:GITHUB_WORKSPACE -Filter "*.zip" -File | Select-Object Name, Length | Format-Table -AutoSize | Out-String | Write-Host
             throw "SpartaArenaRemastered_FullMigration.zip bulunamadı. ZIP dosyasını depo köküne yükle."
           }
 
           $extractDir = Join-Path $env:GITHUB_WORKSPACE "unpacked"
-          if (Test-Path $extractDir) {
-            Remove-Item $extractDir -Recurse -Force
+          if (Test-Path -LiteralPath $extractDir) {
+            Remove-Item -LiteralPath $extractDir -Recurse -Force
           }
           Expand-Archive -LiteralPath $archivePath -DestinationPath $extractDir -Force
 
           $projectFile = Get-ChildItem -Path $extractDir -Filter "project.godot" -Recurse -File | Select-Object -First 1
           if (-not $projectFile) {
+            Write-Host "Arşivden çıkarılan dosya örnekleri:"
+            Get-ChildItem -LiteralPath $extractDir -Recurse -File | Select-Object -First 80 -ExpandProperty FullName | ForEach-Object { Write-Host $_ }
             throw "ZIP içinde project.godot bulunamadı."
           }
 
           $projectDir = $projectFile.DirectoryName
-          Add-Content -Path $env:GITHUB_ENV -Value "PROJECT_DIR=$projectDir"
+          Add-Content -LiteralPath $env:GITHUB_ENV -Value "PROJECT_DIR=$projectDir"
           $diagnosticDir = Join-Path $env:GITHUB_WORKSPACE "diagnostics"
           New-Item -ItemType Directory -Force -Path $diagnosticDir | Out-Null
           Write-Host "Godot proje yolu: $projectDir"
-          Write-Host "Proje ayarı dosyası: $($projectFile.FullName)"
+          Write-Host "Proje dosyası: $($projectFile.FullName)"
 
       - name: Kaynakları içe aktar ve tüm çıktıyı göster
         shell: pwsh
@@ -99,7 +120,7 @@ jobs:
           Write-Host "Godot içe aktarma çıkış kodu: [$importExitCode]"
 
           if ($importExitCode -ne 0) {
-            throw "Godot içe aktarma adımı başarısız oldu. Yukarıdaki günlük çıktısını veya diagnostics/godot-import.log dosyasını kontrol et."
+            throw "Godot içe aktarma adımı başarısız oldu. diagnostics/godot-import.log dosyasını incele."
           }
 
       - name: Godot açılış testi ve GDScript hatalarını kontrol et
@@ -114,12 +135,12 @@ jobs:
           Write-Host "Godot açılış testi çıkış kodu: [$runtimeExitCode]"
 
           if ($runtimeExitCode -ne 0) {
-            throw "Godot açılış testi başarısız oldu. diagnostics/godot-runtime.log dosyasını kontrol et."
+            throw "Godot açılış testi başarısız oldu. diagnostics/godot-runtime.log dosyasını incele."
           }
 
           $runtimeText = Get-Content -LiteralPath $logFile -Raw -ErrorAction SilentlyContinue
           if ($runtimeText -match '(?im)(SCRIPT ERROR:|Parse Error:|Failed to load script|Could not parse script)') {
-            throw "Godot günlüklerinde GDScript ayrıştırma/yükleme hatası bulundu. Yukarıdaki satırları veya diagnostics/godot-runtime.log dosyasını kontrol et."
+            throw "Godot günlüklerinde GDScript ayrıştırma/yükleme hatası bulundu. diagnostics/godot-runtime.log dosyasını incele."
           }
 
       - name: Windows EXE oluştur ve çıktıyı göster
@@ -135,8 +156,8 @@ jobs:
           $exportExitCode = $LASTEXITCODE
           Write-Host "Godot dışa aktarma çıkış kodu: [$exportExitCode]"
 
-          if ($exportExitCode -ne 0 -or -not (Test-Path $exe)) {
-            throw "Windows EXE oluşturulamadı. diagnostics/godot-export.log dosyasını kontrol et."
+          if ($exportExitCode -ne 0 -or -not (Test-Path -LiteralPath $exe)) {
+            throw "Windows EXE oluşturulamadı. diagnostics/godot-export.log dosyasını incele."
           }
           Write-Host "EXE oluşturuldu: $exe"
 
